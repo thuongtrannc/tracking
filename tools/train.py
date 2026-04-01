@@ -193,18 +193,20 @@ class IMMDataset(Dataset):
     Dataset for training the model-based IMM.
     Loads data from imm_single.txt with ground truth and observations.
     """
-    def __init__(self, data_file, config_file, sequence_length=10):
+    def __init__(self, data_file, gt_file, config_file, sequence_length=10):
         self.data_file = data_file
+        self.gt_file = gt_file
         self.config_file = config_file
         self.sequence_length = sequence_length
         
         # Load data
         self.data = np.loadtxt(data_file, delimiter=',')
+        self.gt_data = np.loadtxt(gt_file, delimiter=',')
         
         # Parse data: [x, y, v, vx, vy, w, width, length]
         # Observation: [x, y, width, length]
-        # State: [x, y, v, dv, w, dw, width, length]
-        self.ground_truth = self.data[:, :8]  # Full state
+        # The postition gt is [x, y, w, l]
+        self.ground_truth = self.gt_data[:, [0, 1, 6, 7]]  # x, y, width, length
         self.observations = self.data[:, [0, 1, 6, 7]]  # x, y, width, length
         
         print(f"Loaded {len(self.data)} samples from {data_file}")
@@ -226,33 +228,7 @@ class IMMDataset(Dataset):
             'ground_truth': torch.FloatTensor(gt_seq)
         }
 
-
-def generate_training_data(data_file, config_file):
-    """
-    Generate training features and labels using ModelBasedIMM.
-    Returns features and ground truth x,y positions for MSE loss.
-    """
-    # Load data
-    data = np.loadtxt(data_file, delimiter=',')
-    ground_truth = data[:, :8]  # Full state
-    observations = data[:, [0, 1, 6, 7]]  # x, y, width, length
-    gt_positions = data[:, :2]  # x, y positions only
-    
-    print(f"Generating training data from {len(data)} samples...")
-    
-    # Create IMM instance
-    imm = ModelBasedIMM(config_file, model_path=None, device='cpu')
-    
-    # Generate features (model differences for each timestep)
-    features, _ = imm.get_model_differences_batch(observations, ground_truth)
-    
-    print(f"Generated features shape: {features.shape}")
-    print(f"Ground truth positions shape: {gt_positions.shape}")
-    
-    return features, gt_positions
-
-
-def train_model(config_file, data_file, epochs=100, batch_size=32, 
+def train_model(config_file, data_file, gt_file, epochs=100, batch_size=1, 
                 learning_rate=0.001, save_path='models/imm_model.pth',
                 use_simple_gru=True):
     """
@@ -264,6 +240,7 @@ def train_model(config_file, data_file, epochs=100, batch_size=32,
     Args:
         config_file: Path to IMM configuration file
         data_file: Path to training data file
+        gt_file: Path to ground truth data file
         epochs: Number of training epochs
         batch_size: Batch size for training
         learning_rate: Learning rate for optimizer
@@ -280,42 +257,11 @@ def train_model(config_file, data_file, epochs=100, batch_size=32,
     print("="*60)
     
     data = np.loadtxt(data_file, delimiter=',')
-    ground_truth = data[:, :8]  # Full state
+    gt_data = np.loadtxt(gt_file, delimiter=',')
+
+    ground_truth = gt_data[:, [0, 1, 6, 7]]  # x, y, width, length
     observations = data[:, [0, 1, 6, 7]]  # x, y, width, length
-    gt_positions = data[:, :2]  # Ground truth x, y positions
-    
-    # Generate features
-    print("Generating model difference features...")
-    features, _ = generate_training_data(data_file, config_file)
-    
-    # Split into train and validation
-    split_idx = int(0.8 * len(features))
-    train_features = features[:split_idx]
-    train_gt_pos = gt_positions[:split_idx]
-    train_observations = observations[:split_idx]
-    train_gt_full = ground_truth[:split_idx]
-    
-    val_features = features[split_idx:]
-    val_gt_pos = gt_positions[split_idx:]
-    val_observations = observations[split_idx:]
-    val_gt_full = ground_truth[split_idx:]
-    
-    print(f"\nTraining samples: {len(train_features)}")
-    print(f"Validation samples: {len(val_features)}")
-    print(f"Feature dimension per model: {train_features.shape[2]}")
-    
-    # Convert to tensors
-    train_features = torch.FloatTensor(train_features).to(device)
-    train_gt_pos = torch.FloatTensor(train_gt_pos).to(device)
-    val_features = torch.FloatTensor(val_features).to(device)
-    val_gt_pos = torch.FloatTensor(val_gt_pos).to(device)
-    
-    # Create data loaders
-    train_dataset = torch.utils.data.TensorDataset(train_features, train_gt_pos)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    
-    val_dataset = torch.utils.data.TensorDataset(val_features, val_gt_pos)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    gt_positions = gt_data[:, :2]  # Ground truth x, y positions
     
     # Initialize model
     print(f"\nInitializing {'Simple' if use_simple_gru else 'Complex'} GRU Model...")
@@ -351,6 +297,10 @@ def train_model(config_file, data_file, epochs=100, batch_size=32,
     print("\n" + "="*60)
     print("Starting Training (MSE Loss on x,y positions)")
     print("="*60)
+
+    num_one_train_iters = 100
+    num_one_val_iters = 10
+    train_sequence_length = 100
     
     for epoch in range(epochs):
         # Training
@@ -358,73 +308,47 @@ def train_model(config_file, data_file, epochs=100, batch_size=32,
         train_loss = 0.0
         
         # Reset IMM for training epoch
-        imm_train = ModelBasedIMM(config_file, model_path=None, device='cpu')
-        # Don't set model yet - we'll predict probabilities separately
-        
-        for i in range(len(train_observations)):
-            # Get observation and features
-            z = train_observations[i]
-            gt_pos_i = train_gt_pos[i]  # Already on GPU
-            features_i = train_features[i].unsqueeze(0)  # Already on GPU: (1, 3, 24)
+        imm_train = ModelBasedIMM(config_file, model=model, device='cpu')
+
+        for i in range(num_one_train_iters):
+            # Get random indice for training
+            start_idx = np.random.randint(0, len(observations) - train_sequence_length)
+            for idx in range(start_idx, start_idx + train_sequence_length):
+                # Get observation and features
+                z = observations[idx]
+                gt_pos_i = gt_positions[idx]  # Already on GPU
+                X_hat = imm_train.update(z)  # Get IMM estimate on CPU
             
-            # Predict model probabilities using GPU model
-            model_probs = model(features_i)  # (1, 3)
+                # MSE loss between predicted and ground truth x,y positions
+                optimizer.zero_grad()
+                loss = criterion(X_hat[:2], torch.FloatTensor(gt_pos_i).unsqueeze(0).to(device))
+                loss.backward()
+                
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
             
-            # Run IMM update on CPU to get state estimates from each model
-            # (We don't use the IMM's model probabilities, just the state estimates)
-            imm_train.update(z)
-            
-            # Get individual model estimates (x, y positions only)
-            model_estimates = torch.FloatTensor([
-                imm_train.models[0].X_hat[:2],  # CA: x, y
-                imm_train.models[1].X_hat[:2],  # CV: x, y
-                imm_train.models[2].X_hat[:2],  # CT: x, y
-            ]).to(device)  # (3, 2) - move to GPU
-            
-            # Compute weighted IMM estimate: sum(prob_i * estimate_i)
-            # model_probs: (1, 3), model_estimates: (3, 2)
-            weighted_estimate = torch.matmul(model_probs, model_estimates)  # (1, 2)
-            
-            # MSE loss between predicted and ground truth x,y positions
-            optimizer.zero_grad()
-            loss = criterion(weighted_estimate, gt_pos_i.unsqueeze(0))
-            loss.backward()
-            
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            
-            train_loss += loss.item()
-        
-        train_loss /= len(train_observations)
+                train_loss += loss.item() / train_sequence_length
+
         train_losses.append(train_loss)
         
         # Validation
         model.eval()
         val_loss = 0.0
-        
-        imm_val = ModelBasedIMM(config_file, model_path=None, device='cpu')
-        
+
+        imm_val = ModelBasedIMM(config_file, model=model, device='cpu')
+
         with torch.no_grad():
-            for i in range(len(val_observations)):
-                z = val_observations[i]
-                gt_pos_i = val_gt_pos[i]  # Already on GPU
-                features_i = val_features[i].unsqueeze(0)  # Already on GPU
-                
-                model_probs = model(features_i)
-                imm_val.update(z)
-                
-                model_estimates = torch.FloatTensor([
-                    imm_val.models[0].X_hat[:2],
-                    imm_val.models[1].X_hat[:2],
-                    imm_val.models[2].X_hat[:2],
-                ]).to(device)
-                
-                weighted_estimate = torch.matmul(model_probs, model_estimates)
-                loss = criterion(weighted_estimate, gt_pos_i.unsqueeze(0))
-                val_loss += loss.item()
+            # Get random indice for validation
+            start_idx = np.random.randint(0, len(observations) - train_sequence_length)
+            for idx in range(start_idx, start_idx + train_sequence_length):
+                z = observations[idx]
+                gt_pos_i = gt_positions[idx]  # Already on GPU
+                X_hat = imm_val.update(z)  # Get IMM estimate on CPU
+
+                loss = criterion(X_hat[:2], torch.FloatTensor(gt_pos_i).unsqueeze(0).to(device))
+                val_loss += loss.item() / train_sequence_length
         
-        val_loss /= len(val_observations)
         val_losses.append(val_loss)
         
         # Learning rate scheduling
@@ -473,78 +397,6 @@ def train_model(config_file, data_file, epochs=100, batch_size=32,
     
     return model, history
 
-
-def test_model(config_file, data_file, model_path):
-    """
-    Test the trained model on the dataset
-    """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Create IMM with trained model (it will load the model internally)
-    print(f"Loading model from {model_path}")
-    imm = ModelBasedIMM(config_file, model_path=model_path, device=device)
-    
-    # Load test data
-    data = np.loadtxt(data_file, delimiter=',')
-    ground_truth = data[:, :8]
-    observations = data[:, [0, 1, 6, 7]]
-    
-    print(f"\nTesting on {len(observations)} samples...")
-    
-    # Run IMM
-    estimates = []
-    model_probs = []
-    
-    try:
-        for t in range(len(observations)):
-            z = observations[t]
-            imm.update(z)
-            estimate = imm.get_estimate()
-            probs = imm.get_model_prob()
-            
-            # Check for NaN
-            if np.isnan(estimate).any() or np.isnan(probs).any():
-                print(f"\n⚠ Warning: NaN detected at timestep {t}")
-                print(f"  Estimate: {estimate}")
-                print(f"  Probabilities: {probs}")
-                break
-                
-            estimates.append(estimate.copy())
-            model_probs.append(probs.copy())
-    except Exception as e:
-        print(f"\n❌ Error during tracking at timestep {t}: {e}")
-        import traceback
-        traceback.print_exc()
-        return None, None
-    
-    estimates = np.array(estimates)
-    model_probs = np.array(model_probs)
-    
-    # Calculate RMSE only on successfully processed samples
-    if len(estimates) > 0:
-        errors = estimates - ground_truth[:len(estimates)]
-        rmse = np.sqrt(np.mean(errors ** 2, axis=0))
-        
-        print(f"\nProcessed {len(estimates)}/{len(observations)} samples")
-        print("\nRMSE per state dimension:")
-        state_names = ['x', 'y', 'v', 'dv', 'w', 'dw', 'width', 'length']
-        for i, name in enumerate(state_names):
-            print(f"  {name}: {rmse[i]:.6f}")
-        
-        print(f"\nOverall RMSE: {np.mean(rmse):.6f}")
-        
-        print("\nAverage model probabilities:")
-        print(f"  CA: {np.mean(model_probs[:, 0]):.4f}")
-        print(f"  CV: {np.mean(model_probs[:, 1]):.4f}")
-        print(f"  CT: {np.mean(model_probs[:, 2]):.4f}")
-    else:
-        print("\n❌ No estimates generated - check model initialization")
-    
-    return estimates, model_probs
-    
-    return estimates, model_probs
-
-
 if __name__ == "__main__":
     import argparse
     
@@ -552,6 +404,8 @@ if __name__ == "__main__":
     parser.add_argument('--config', type=str, default='configs/imm.json',
                         help='Path to configuration file')
     parser.add_argument('--data', type=str, default='data/imm_single.txt',
+                        help='Path to training data file')
+    parser.add_argument('--gt_file', type=str, default='data/imm_single_gt.txt',
                         help='Path to training data file')
     parser.add_argument('--model-path', type=str, default='models/imm_gru_model.pth',
                         help='Path to save the trained model')
@@ -582,28 +436,11 @@ if __name__ == "__main__":
         model, history = train_model(
             config_file=args.config,
             data_file=args.data,
+            gt_file=args.gt_file,
             epochs=args.epochs,
             batch_size=args.batch_size,
             learning_rate=args.lr,
             save_path=args.model_path,
             use_simple_gru=args.simple_gru
         )
-    
-    # Test the model
-    if os.path.exists(args.model_path):
-        print("\n" + "=" * 60)
-        print("Testing Trained Model")
-        print("=" * 60)
-        
-        estimates, model_probs = test_model(
-            config_file=args.config,
-            data_file=args.data,
-            model_path=args.model_path
-        )
-        
-        print("\n" + "=" * 60)
-        print("Completed!")
-        print("=" * 60)
-    else:
-        print(f"\nModel not found at {args.model_path}")
-        print("Training may have failed or was skipped.")
+

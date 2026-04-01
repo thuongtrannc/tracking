@@ -14,7 +14,7 @@ class ModelBasedIMM:
     Model-Based Interactive Multiple Model (IMM) using neural networks
     to predict model probabilities instead of using transition matrix.
     """
-    def __init__(self, config_file, model_path=None, device='cpu') -> None:
+    def __init__(self, config_file, model, device='cpu') -> None:
         self.configs = self.load_configs(config_file)
         self.device = device
 
@@ -36,9 +36,7 @@ class ModelBasedIMM:
         self.X_hat = self.filter_cv.X_hat.copy()
         
         # Neural network for model probability prediction
-        self.model_net = None
-        if model_path is not None:
-            self.load_model(model_path)
+        self.model_net = model.to(self.device)
 
         # Initialize state history for computing differences
         self.prev_z = None
@@ -115,140 +113,35 @@ class ModelBasedIMM:
         Update the IMM filter with a new observation.
         Uses neural network to predict model probabilities if available.
         """
-        # Store predictions before update for computing delta_x later
-        self.prev_X_pred = [model.X_.copy() for model in self.models]
+        #1. Get predictions for each model
+        X = [model.get_estimate() for model in self.models]
         
-        # Compute model differences for all models (before update)
+        #2. Compute the model differences for each model
         model_differences_list = []
         for i in range(self.model_cnt):
             model_diff, _ = self.compute_model_differences(z, i)
             model_differences_list.append(model_diff)
-        
-        # Get current states and covariances
-        X = [model.get_estimate() for model in self.models]
-        self.P = [model.P.copy() for model in self.models]
 
-        # State interaction (mixing) - use current model probabilities
-        # In traditional IMM, we would use transition matrix here
-        # For model-based, we use the current probabilities
-        u = self.U.copy()
-        
-        # Mixing probabilities: mu[j,i] is probability that model j was active
-        # given that model i is active now
-        mu = np.zeros((self.model_cnt, self.model_cnt))
-        for i in range(self.model_cnt):
-            if u[i] > 1e-10:
-                for j in range(self.model_cnt):
-                    # For model-based IMM without transition matrix,
-                    # we assume equal mixing from all previous models
-                    mu[j, i] = self.U[j] / u[i]
-            else:
-                for j in range(self.model_cnt):
-                    mu[j, i] = 1.0 / self.model_cnt
-        
-        # Mixed initial conditions for each model
-        Xmix = [np.zeros(self.state_dim) for _ in range(self.model_cnt)]
-        for i in range(self.model_cnt):
-            for j in range(self.model_cnt):
-                Xmix[i] += mu[j, i] * X[j]
-
-        Pmix = [np.zeros((self.state_dim, self.state_dim)) for _ in range(self.model_cnt)]
-        for i in range(self.model_cnt):
-            for j in range(self.model_cnt):
-                diff = X[j] - Xmix[i]
-                Pmix[i] += mu[j, i] * (self.P[j] + np.outer(diff, diff))
+        #3. Predict model probabilities
+        model_differences_input = np.stack(model_differences_list, axis=0)
+        model_differences_input = torch.from_numpy(model_differences_input).float().to(self.device)
             
-            # Add small regularization to ensure positive definiteness
-            Pmix[i] += np.eye(self.state_dim) * 1e-6
-
-        # Update each filter with mixed initial conditions
-        for i in range(self.model_cnt):
-            try:
-                self.models[i].update(z, Pmix[i], Xmix[i])
-            except Exception as e:
-                print(f"Warning: Model {i} update failed: {e}")
-                # Keep previous estimate if update fails
-                pass
-
-        # Now update forward update differences (delta_x) after models are updated
-        self.update_forward_differences(model_differences_list)
-        
-        # Clip features to prevent extreme values
-        for i in range(len(model_differences_list)):
-            model_differences_list[i] = np.clip(model_differences_list[i], -1e6, 1e6)
-        
-        # Predict model probabilities using neural network
-        if self.model_net is not None:
-            with torch.no_grad():
-                # Stack all model differences: shape (3, 24)
-                # where 24 = 2*obs_dim + 2*state_dim = 2*4 + 2*8
-                input_features = np.stack(model_differences_list, axis=0)
-                
-                # Check for NaN/Inf in features
-                if np.isnan(input_features).any() or np.isinf(input_features).any():
-                    print(f"Warning: NaN/Inf in features, using likelihood-based update")
-                    # Fall back to likelihood
-                    self.model_net = None
-                else:
-                    input_tensor = torch.FloatTensor(input_features).unsqueeze(0).to(self.device)  # (1, 3, 24)
-                    
-                    # Get model probabilities from network
-                    u_pred = self.model_net(input_tensor)  # (1, 3)
-                    u_pred = u_pred.cpu().numpy().squeeze()
-                    
-                    # Update model probabilities (already normalized by softmax in network)
-                    self.U = u_pred
-        
-        if self.model_net is None:
-            # Fallback to likelihood-based update (traditional IMM approach)
-            likelihood = np.zeros(self.model_cnt)
-            for i in range(self.model_cnt):
-                # Innovation
-                DZ = z - np.matmul(self.models[i].H, self.models[i].X_hat)
-                # Innovation covariance
-                S = np.matmul(np.matmul(self.models[i].H, self.models[i].P), 
-                             self.models[i].H.T) + self.models[i].R
-                
-                # Add regularization
-                S += np.eye(len(DZ)) * 1e-6
-                
-                # Gaussian likelihood
-                det_S = np.linalg.det(S)
-                if det_S > 1e-10:
-                    try:
-                        inv_S = np.linalg.inv(S)
-                        likelihood[i] = (2 * np.pi * det_S) ** (-0.5) * \
-                                       np.exp(-0.5 * np.dot(np.dot(DZ.T, inv_S), DZ))
-                    except:
-                        likelihood[i] = 1e-10
-                else:
-                    likelihood[i] = 1e-10
-                
-                # Update model probability
-                self.U[i] = likelihood[i] * u[i]
+        with torch.no_grad():
+            model_probs = self.model_net(model_differences_input)  # Shape: (model_cnt, num_classes)
+            model_probs = torch.softmax(model_probs, dim=1).cpu().numpy()  # Convert to probabilities
             
-            # Normalize probabilities
-            sum_U = np.sum(self.U)
-            if sum_U > 1e-10:
-                self.U = self.U / sum_U
-            else:
-                self.U = np.ones(self.model_cnt) / self.model_cnt
+        # Update model probabilities
+        self.U = model_probs.mean(axis=0)  # Average over models to get final probabilities
 
-        # Compute combined estimate: weighted average of model estimates
-        X = [model.get_estimate() for model in self.models]
-        self.X_hat = np.zeros(self.state_dim)
+        # 4. Update each model independently (no mixing)
         for i in range(self.model_cnt):
-            self.X_hat += self.U[i] * X[i]
+            self.models[i].update(z, self.models[i].P, self.models[i].X_hat)
         
-        # Check for NaN in final estimate
-        if np.isnan(self.X_hat).any():
-            print("Warning: NaN in final estimate, resetting to first model")
-            self.X_hat = X[0].copy()
-            self.U = np.array([1.0, 0.0, 0.0])
+        # 5. Compute combined state estimate as weighted sum of model estimates
+        X = [model.get_estimate() for model in self.models]
+        self.X_hat = self.U[0] * X[0] + self.U[1] * X[1] + self.U[2] * X[2]
 
-        # Store current observation and estimates for next iteration
-        self.prev_z = z.copy()
-        self.prev_X_hat = [X[i].copy() for i in range(self.model_cnt)]
+        return self.X_hat
 
     def get_estimate(self):
         return self.X_hat

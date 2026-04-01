@@ -109,8 +109,9 @@ class DataGenerator():
         self.add_noise()
         noise_data = np.array(self.noise_data)
         np.savetxt(self.save_name, noise_data, delimiter=',')
+        np.savetxt(self.save_name.replace('.txt', '_gt.txt'), self.data, delimiter=',')
 
 
 if __name__ == '__main__':
-    data_generator = DataGenerator(config_file='tracking/configs/imm.json')
+    data_generator = DataGenerator(config_file='configs/imm.json')
     data_generator.save_data()
