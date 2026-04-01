@@ -10,7 +10,7 @@ if __name__ == '__main__':
 
     data_path = 'data/imm_single.txt'
     save_name = 'data/filter_imm.txt'
-    u_prob_save_name = 'data/uprob.txt'
+    u_prob_save_name = 'uprob.txt'
     data = np.loadtxt(data_path, delimiter=',')
     config_file = "configs/imm.json"
 

@@ -6,7 +6,7 @@ sys.path.append(os.getcwd())
 import numpy as np
 import json
 
-from tracking.core.mot import MOT
+from core.mot import MOT
 
 tracks = []
 

@@ -63,6 +63,6 @@ class VisData:
 
     
 if __name__ == "__main__":
-    vis_data = VisData("tracking/configs/imm.json")
+    vis_data = VisData("configs/imm.json")
     vis_data.plot_position()
     vis_data.plot_others()

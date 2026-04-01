@@ -7,8 +7,8 @@ sys.path.append(os.getcwd())
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from tracking.aux.utils import compute_iou
-from tracking.aux.utils import get_corners
+from aux.utils import compute_iou
+from aux.utils import get_corners
 
 
 class Matching():

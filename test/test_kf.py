@@ -3,14 +3,14 @@ import sys
 sys.path.append(os.getcwd())
 
 import numpy as np
-from tracking.core.kalman_filter import KamanFilter
+from core.kalman_filter import KamanFilter
 
 if __name__ == '__main__':
 
-    data_path = 'tracking/data/imm_single.txt'
-    save_name = 'tracking/data/filter_imm.txt'
+    data_path = 'data/imm_single.txt'
+    save_name = 'data/filter_imm.txt'
     data = np.loadtxt(data_path, delimiter=',')
-    config_file = "tracking/configs/imm.json"
+    config_file = "configs/imm.json"
     model = "ca"
 
     km = KamanFilter(0, config_file, model)

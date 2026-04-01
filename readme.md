@@ -31,7 +31,7 @@ The order of developing this repo is as follows:
 
 ```python vis/multi_vis.py```
 
-This code is the not official implementaation of the paper `3D Multi-Object Tracking: A Baseline and New Evaluation Metrics`: https://arxiv.org/pdf/1907.03961.pdf 
+This code is the not official implementation of the paper `3D Multi-Object Tracking: A Baseline and New Evaluation Metrics`: https://arxiv.org/pdf/1907.03961.pdf 
 
 
 

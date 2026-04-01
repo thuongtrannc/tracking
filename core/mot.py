@@ -5,8 +5,8 @@ sys.path.append(os.getcwd)
 
 import numpy as np
 import json
-from tracking.core.hungarian import Matching
-from tracking.core.kalman_filter import KamanFilter
+from core.hungarian import Matching
+from core.kalman_filter import KamanFilter
 
 entity = {  'id': [],
             'last_time': [],

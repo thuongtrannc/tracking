@@ -181,6 +181,6 @@ class Vis():
             
 
 if __name__ == '__main__':
-    vis = Vis('tracking/data/test_cv.txt')
+    vis = Vis('data/test_cv.txt')
     vis.run()
     
