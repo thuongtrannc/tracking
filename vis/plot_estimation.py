@@ -103,8 +103,10 @@ class VisData:
         plt.show()
     
 if __name__ == "__main__":
-    estimation_file = "data/filter_imm.txt"
-    uprob_file = "data/uprob.txt"
+    estimation_file = "data/filter_model_based_imm.txt"
+    uprob_file = "data/uprob_model.txt"
+    # estimation_file = "data/filter_imm.txt"
+    # uprob_file = "data/uprob.txt"
     vis_data = VisData("configs/imm.json", estimation_file, uprob_file)
     vis_data.plot_position()
     vis_data.plot_others()

@@ -48,6 +48,29 @@ class ModelBasedIMM:
         with open(config_file, 'r') as f:
             return json.load(f)
 
+    def _reset_filters(self):
+        """Reset Kalman filter states and history for a new sequence"""
+        # Reset each Kalman filter to initial state
+        for model in self.models:
+            model.init_estimator(model.P_, model.X_hat)
+        
+        # Reset history
+        self.prev_z = None
+        self.prev_X_pred = [None, None, None]
+        self.prev_X_hat = [None, None, None]
+        
+        # Reset model probabilities to uniform
+        self.U = np.array([1.0/3, 1.0/3, 1.0/3])
+        self.X_hat = self.filter_cv.X_hat.copy()
+
+    def _init_filters(self, initial_state):
+        """Initialize Kalman filter states with the first observation"""
+        for model in self.models:
+            model.X_hat[0] = initial_state[0]  # x position
+            model.X_hat[1] = initial_state[1]  # y position
+            model.X_hat[6] = initial_state[2]  # w
+            model.X_hat[7] = initial_state[3]  # l
+
     def load_model(self, model_path):
         """Load the trained neural network model"""
         self.model_net = torch.load(model_path, map_location=self.device)
@@ -122,16 +145,24 @@ class ModelBasedIMM:
             model_diff, _ = self.compute_model_differences(z, i)
             model_differences_list.append(model_diff)
 
-        #3. Predict model probabilities
+        #3. Predict model probabilities using neural network
+        # Stack model differences: shape (num_models, feature_dim)
         model_differences_input = np.stack(model_differences_list, axis=0)
-        model_differences_input = torch.from_numpy(model_differences_input).float().to(self.device)
+        
+        # Add batch dimension: (1, num_models, feature_dim)
+        model_differences_input = torch.from_numpy(model_differences_input).float().unsqueeze(0).to(self.device)
             
+        # model_net expects: (batch_size, num_models, feature_dim)
+        # and returns: (batch_size, num_models) with probabilities
+        model_probs = self.model_net(model_differences_input)  # Shape: (1, num_models)
+        model_probs = model_probs.squeeze(0)  # Shape: (num_models,) - KEEP GRADIENTS!
+        
+        # Store tensor with gradients for weighted sum computation
+        self._last_probs_tensor = model_probs
+        
+        # Also convert to numpy for internal bookkeeping
         with torch.no_grad():
-            model_probs = self.model_net(model_differences_input)  # Shape: (model_cnt, num_classes)
-            model_probs = torch.softmax(model_probs, dim=1).cpu().numpy()  # Convert to probabilities
-            
-        # Update model probabilities
-        self.U = model_probs.mean(axis=0)  # Average over models to get final probabilities
+            self.U = model_probs.cpu().numpy()  # Shape: (num_models,)
 
         # 4. Update each model independently (no mixing)
         for i in range(self.model_cnt):
@@ -139,9 +170,32 @@ class ModelBasedIMM:
         
         # 5. Compute combined state estimate as weighted sum of model estimates
         X = [model.get_estimate() for model in self.models]
-        self.X_hat = self.U[0] * X[0] + self.U[1] * X[1] + self.U[2] * X[2]
-
-        return self.X_hat
+        X_combined = self.U[0] * X[0] + self.U[1] * X[1] + self.U[2] * X[2]
+        
+        # Store as numpy for internal use
+        self.X_hat = X_combined
+        
+        # For training: return weighted sum with gradients through probabilities
+        # Convert state estimates to tensors (no gradients needed from Kalman filter)
+        X_torch = torch.stack([
+            torch.from_numpy(X[i]).float().to(self.device) 
+            for i in range(self.model_cnt)
+        ])  # Shape: (num_models, state_dim)
+        
+        # Use the probability tensor that already has gradients from the network
+        # model_probs from forward pass already has gradients
+        # We need to store it during update
+        if hasattr(self, '_last_probs_tensor'):
+            # Use stored probabilities with gradients
+            probs_for_grad = self._last_probs_tensor  # Shape: (num_models,)
+            # Weighted sum: sum over models
+            X_hat_torch = torch.sum(probs_for_grad.unsqueeze(1) * X_torch, dim=0)  # Shape: (state_dim,)
+        else:
+            # Fallback: no gradients (inference mode)
+            U_torch = torch.from_numpy(self.U).float().to(self.device)
+            X_hat_torch = torch.sum(U_torch.unsqueeze(1) * X_torch, dim=0)
+        
+        return X_hat_torch
 
     def get_estimate(self):
         return self.X_hat

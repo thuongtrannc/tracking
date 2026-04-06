@@ -187,47 +187,6 @@ class GRUModelNet(nn.Module):
         
         return probs
 
-
-class IMMDataset(Dataset):
-    """
-    Dataset for training the model-based IMM.
-    Loads data from imm_single.txt with ground truth and observations.
-    """
-    def __init__(self, data_file, gt_file, config_file, sequence_length=10):
-        self.data_file = data_file
-        self.gt_file = gt_file
-        self.config_file = config_file
-        self.sequence_length = sequence_length
-        
-        # Load data
-        self.data = np.loadtxt(data_file, delimiter=',')
-        self.gt_data = np.loadtxt(gt_file, delimiter=',')
-        
-        # Parse data: [x, y, v, vx, vy, w, width, length]
-        # Observation: [x, y, width, length]
-        # The postition gt is [x, y, w, l]
-        self.ground_truth = self.gt_data[:, [0, 1, 6, 7]]  # x, y, width, length
-        self.observations = self.data[:, [0, 1, 6, 7]]  # x, y, width, length
-        
-        print(f"Loaded {len(self.data)} samples from {data_file}")
-        print(f"Ground truth shape: {self.ground_truth.shape}")
-        print(f"Observations shape: {self.observations.shape}")
-        
-    def __len__(self):
-        return len(self.data) - self.sequence_length
-    
-    def __getitem__(self, idx):
-        """
-        Returns a sequence of observations and corresponding ground truth
-        """
-        obs_seq = self.observations[idx:idx+self.sequence_length]
-        gt_seq = self.ground_truth[idx:idx+self.sequence_length]
-        
-        return {
-            'observations': torch.FloatTensor(obs_seq),
-            'ground_truth': torch.FloatTensor(gt_seq)
-        }
-
 def train_model(config_file, data_file, gt_file, epochs=100, batch_size=1, 
                 learning_rate=0.001, save_path='models/imm_model.pth',
                 use_simple_gru=True):
@@ -299,29 +258,47 @@ def train_model(config_file, data_file, gt_file, epochs=100, batch_size=1,
     print("="*60)
 
     num_one_train_iters = 100
-    num_one_val_iters = 10
+    num_one_val_iters = 1
     train_sequence_length = 100
+    # val_sequence_length = 100
+    val_sequence_length = len(observations) - 1  # Use full sequence for validation to get stable estimate of val loss
+
+    # Create IMM instances once (reuse the same model reference)
+    # imm_train = ModelBasedIMM(config_file, model=model, device=device)
+    # imm_val = ModelBasedIMM(config_file, model=model, device=device)
+    imm_model = ModelBasedIMM(config_file, model=model, device=device)
     
     for epoch in range(epochs):
         # Training
         model.train()
         train_loss = 0.0
         
-        # Reset IMM for training epoch
-        imm_train = ModelBasedIMM(config_file, model=model, device='cpu')
-
+        print('Epoch {:3d}/{:3d} - Training... \n'.format(epoch + 1, epochs))
         for i in range(num_one_train_iters):
+            print(f"  Training iteration {i+1}/{num_one_train_iters}...", end='\r')
+            
+            # Reset Kalman filters for each training sequence
+            imm_model._reset_filters()
+
             # Get random indice for training
             start_idx = np.random.randint(0, len(observations) - train_sequence_length)
+
+            # Initialize IMM with the first observation of the training sequence
+            initial_state = observations[start_idx]
+            imm_model._init_filters(initial_state)
+
             for idx in range(start_idx, start_idx + train_sequence_length):
                 # Get observation and features
                 z = observations[idx]
-                gt_pos_i = gt_positions[idx]  # Already on GPU
-                X_hat = imm_train.update(z)  # Get IMM estimate on CPU
+                gt_pos_i = gt_positions[idx]  # Shape: (2,) - numpy array
+                X_hat = imm_model.update(z)  # Get IMM estimate - returns torch tensor on device
             
                 # MSE loss between predicted and ground truth x,y positions
                 optimizer.zero_grad()
-                loss = criterion(X_hat[:2], torch.FloatTensor(gt_pos_i).unsqueeze(0).to(device))
+                # X_hat is (8,) on device, extract first 2 elements for x,y
+                # gt_pos_i is (2,) numpy array, convert to tensor on same device
+                gt_pos_tensor = torch.FloatTensor(gt_pos_i).to(device)
+                loss = criterion(X_hat[:2], gt_pos_tensor)
                 loss.backward()
                 
                 # Gradient clipping
@@ -330,43 +307,55 @@ def train_model(config_file, data_file, gt_file, epochs=100, batch_size=1,
             
                 train_loss += loss.item() / train_sequence_length
 
-        train_losses.append(train_loss)
+        # Compute average losses
+        avg_train_loss = train_loss / num_one_train_iters
+        train_losses.append(avg_train_loss)
         
         # Validation
         model.eval()
         val_loss = 0.0
 
-        imm_val = ModelBasedIMM(config_file, model=model, device='cpu')
-
         with torch.no_grad():
-            # Get random indice for validation
-            start_idx = np.random.randint(0, len(observations) - train_sequence_length)
-            for idx in range(start_idx, start_idx + train_sequence_length):
-                z = observations[idx]
-                gt_pos_i = gt_positions[idx]  # Already on GPU
-                X_hat = imm_val.update(z)  # Get IMM estimate on CPU
+            for i in range(num_one_val_iters):
+                # Reset Kalman filters for each validation sequence
+                imm_model._reset_filters()
 
-                loss = criterion(X_hat[:2], torch.FloatTensor(gt_pos_i).unsqueeze(0).to(device))
-                val_loss += loss.item() / train_sequence_length
-        
-        val_losses.append(val_loss)
-        
+                # Get random indice for validation
+                start_idx = np.random.randint(0, len(observations) - val_sequence_length)
+
+                # Initialize IMM with the first observation of the validation sequence
+                initial_state = observations[start_idx]
+                imm_model._init_filters(initial_state)
+
+                for idx in range(start_idx, start_idx + val_sequence_length):
+                    z = observations[idx]
+                    gt_pos_i = gt_positions[idx]  # Shape: (2,) - numpy array
+                    X_hat = imm_model.update(z)  # Get IMM estimate - returns torch tensor on device
+
+                    # MSE loss between predicted and ground truth x,y positions
+                    gt_pos_tensor = torch.FloatTensor(gt_pos_i).to(device)
+                    loss = criterion(X_hat[:2], gt_pos_tensor)
+                    val_loss += loss.item() / val_sequence_length
+
+        # Compute average validation loss
+        avg_val_loss = val_loss / num_one_val_iters
+        val_losses.append(avg_val_loss)
+
         # Learning rate scheduling
-        scheduler.step(val_loss)
+        scheduler.step(avg_val_loss)
         
-        # Print progress
-        if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"Epoch [{epoch+1:3d}/{epochs}] | "
-                  f"Train Loss (MSE): {train_loss:.6f} | "
-                  f"Val Loss (MSE): {val_loss:.6f}")
+        # Print progress with AVERAGED losses
+        print(f"Epoch [{epoch+1:3d}/{epochs}] | "
+                f"Train Loss (MSE): {avg_train_loss:.6f} | "
+                f"Val Loss (MSE): {avg_val_loss:.6f}")
         
         # Save best model and early stopping
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
             os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
             torch.save(model, save_path)
             if (epoch + 1) % 10 == 0 or epoch == 0:
-                print(f"  → Saved best model (val_loss: {val_loss:.6f})")
+                print(f"  → Saved best model (val_loss: {avg_val_loss:.6f})")
             patience_counter = 0
         else:
             patience_counter += 1
@@ -443,4 +432,7 @@ if __name__ == "__main__":
             save_path=args.model_path,
             use_simple_gru=args.simple_gru
         )
+
+    
+
 
