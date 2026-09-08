@@ -7,9 +7,9 @@ import numpy as np
 import json
 
 class VisData:
-    def __init__(self, config_file, estimation_file, uprob_file) -> None:
+    def __init__(self, config_file, estimation_file, uprob_file, data_file) -> None:
         self.configs = self.load_configs(config_file)
-        self.data_file = self.configs["save_name"]
+        self.data_file = data_file
         self.estimation_file = estimation_file
         self.uprob_file = uprob_file
 
@@ -103,11 +103,12 @@ class VisData:
         plt.show()
     
 if __name__ == "__main__":
-    estimation_file = "data/filter_model_based_imm.txt"
-    uprob_file = "data/uprob_model.txt"
-    # estimation_file = "data/filter_imm.txt"
-    # uprob_file = "data/uprob.txt"
-    vis_data = VisData("configs/imm.json", estimation_file, uprob_file)
+    # estimation_file = "data/filter_model_based_imm.txt"
+    # uprob_file = "data/uprob_model.txt"
+    data_file = "data/monte_carlo_simulation_data/imm_mc_0000.txt"
+    estimation_file = "data/monte_carlo_simulation_data/imm_mc_000_filter.txt"
+    uprob_file = "data/monte_carlo_simulation_data/imm_mc_000_uprob.txt"
+    vis_data = VisData("configs/imm.json", estimation_file, uprob_file, data_file)
     vis_data.plot_position()
     vis_data.plot_others()
     vis_data.plot_uprob()

@@ -8,9 +8,9 @@ from core.imm import IMM
 
 if __name__ == '__main__':
 
-    data_path = 'data/imm_single.txt'
-    save_name = 'data/filter_imm.txt'
-    u_prob_save_name = 'uprob.txt'
+    data_path = 'data/monte_carlo_simulation_data/imm_mc_0000.txt'
+    save_name = 'data/monte_carlo_simulation_data/imm_mc_000_filter.txt'
+    u_prob_save_name = 'data/monte_carlo_simulation_data/imm_mc_000_uprob.txt'
     data = np.loadtxt(data_path, delimiter=',')
     config_file = "configs/imm.json"
 

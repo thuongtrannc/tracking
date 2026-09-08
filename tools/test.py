@@ -126,15 +126,39 @@ def test_model_based_imm(config_file, data_file, gt_file, model_path,
         print(f"Error: Model file not found at {model_path}")
         return None
     
-    try:
-        model = torch.load(model_path, map_location=device)
-        model.eval()
-        print("Model loaded successfully!")
-        total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"Total trainable parameters: {total_params:,}")
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        return None
+    # First, try loading the state_dict version (more portable)
+    state_dict_path = model_path.replace('.pth', '_state_dict.pth')
+    
+    if os.path.exists(state_dict_path):
+        try:
+            print(f"Found state dict file: {state_dict_path}")
+            model = SimpleGRUModelNet(obs_dim=4, state_dim=8, hidden_dim=128, num_models=3, num_layers=2)
+            model.load_state_dict(torch.load(state_dict_path, map_location=device))
+            model = model.to(device)
+            model.eval()
+            print("✓ Model loaded successfully from state dict!")
+            total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            print(f"Total trainable parameters: {total_params:,}")
+        except Exception as e:
+            print(f"✗ Error loading model from state dict: {e}")
+            return None
+    else:
+        # Try loading complete model with proper module reference
+        try:
+            import sys
+            # Add SimpleGRUModelNet to __main__ module so pickle can find it
+            sys.modules['__main__'].SimpleGRUModelNet = SimpleGRUModelNet
+            
+            model = torch.load(model_path, map_location=device)
+            model.eval()
+            print("✓ Model loaded successfully (complete model)!")
+            total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            print(f"Total trainable parameters: {total_params:,}")
+        except Exception as e:
+            print(f"✗ Failed to load complete model: {e}")
+            print(f"Hint: State dict file not found at {state_dict_path}")
+            print("Please retrain the model to generate the state dict file.")
+            return None
     
     # Initialize Model-Based IMM
     print("\nInitializing Model-Based IMM...")

@@ -1,0 +1,162 @@
+import os
+import sys
+sys.path.append(os.getcwd())
+
+import json
+import numpy as np
+import matplotlib.pyplot as plt
+from core.imm import IMM
+
+
+def load_config(config_file):
+    with open(config_file, 'r') as f:
+        return json.load(f)
+
+
+def load_observations(data_file):
+    data = np.loadtxt(data_file, delimiter=',')
+    return data[:, [0, 1, 6, 7]]
+
+
+def load_ground_truth(gt_file):
+    return np.loadtxt(gt_file, delimiter=',')
+
+
+def build_motion_profile(config, length):
+    dT = config['data']['dT']
+    times = np.arange(length) * dT
+    phases = np.full(length, 'CV', dtype='<U10')
+
+    ca_start = config['ca']['time_start']
+    ca_end = config['ca']['time_end']
+    ct_start = config['ct']['time_start']
+    ct_end = config['ct']['time_end']
+
+    for i, t in enumerate(times):
+        if ct_start <= t < ct_end:
+            phases[i] = 'CT'
+        elif ca_start <= t < ca_end:
+            phases[i] = 'CA'
+        else:
+            phases[i] = 'CV'
+
+    return times, phases
+
+
+def run_standard_imm(config_file, obs_file, gt_file):
+    config = load_config(config_file)
+    observations = load_observations(obs_file)
+    ground_truth = load_ground_truth(gt_file)
+    num_steps = observations.shape[0]
+
+    times, motion_phases = build_motion_profile(config, num_steps)
+
+    imm = IMM(config_file)
+
+    estimates = np.zeros((num_steps, imm.state_dim))
+    probs = np.zeros((num_steps, imm.model_cnt))
+
+    for i in range(num_steps):
+        z = observations[i]
+        imm.update(z)
+        est = imm.get_estimate()
+        if est is None:
+            est = np.zeros(imm.state_dim)
+        estimates[i] = est
+        probs[i] = imm.get_model_prob().copy()
+
+    errors = estimates[:, :2] - ground_truth[:, :2]
+    rmse_x = np.sqrt(np.mean(errors[:, 0] ** 2))
+    rmse_y = np.sqrt(np.mean(errors[:, 1] ** 2))
+    rmse_total = np.sqrt(np.mean(np.sum(errors ** 2, axis=1)))
+
+    print('Standard IMM experiment results:')
+    print(f'  Samples: {num_steps}')
+    print(f'  RMSE x: {rmse_x:.6f}')
+    print(f'  RMSE y: {rmse_y:.6f}')
+    print(f'  RMSE position: {rmse_total:.6f}')
+
+    # Save filter outputs and probs for visualization
+    os.makedirs('data', exist_ok=True)
+    filter_out = np.zeros((num_steps, 6))
+    filter_out[:, 0] = estimates[:, 0]
+    filter_out[:, 1] = estimates[:, 1]
+    filter_out[:, 2] = estimates[:, 2] * np.cos(estimates[:, 4])
+    filter_out[:, 3] = estimates[:, 2] * np.sin(estimates[:, 4])
+    filter_out[:, 4] = estimates[:, 6]
+    filter_out[:, 5] = estimates[:, 7]
+    np.savetxt('data/filter_imm_standard.txt', filter_out, delimiter=',')
+    np.savetxt('data/uprob_imm_standard.txt', probs, delimiter=',')
+
+    return times, motion_phases, probs, errors, rmse_x, rmse_y, rmse_total
+
+
+def plot_model_probabilities(times, motion_phases, probs, save_path=None):
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(times, probs[:, 0], label='CV', color='tab:red')
+    ax.plot(times, probs[:, 1], label='CA', color='tab:blue')
+    ax.plot(times, probs[:, 2], label='CT', color='tab:green')
+
+    colors = {'CV': '#e0f3ff', 'CT': '#e0ffe0', 'CA': '#ffe0e0'}
+    start = 0
+    current = motion_phases[0]
+    for i, phase in enumerate(motion_phases):
+        if phase != current or i == len(motion_phases) - 1:
+            end = i if phase != current else i + 1
+            ax.axvspan(times[start], times[end - 1], color=colors[current], alpha=0.12)
+            start = i
+            current = phase
+    ax.axvspan(times[start], times[-1], color=colors[current], alpha=0.12)
+
+    ax.set_xlabel('Time [s]')
+    ax.set_ylabel('Model probability')
+    ax.set_title('IMM model probabilities')
+    ax.legend(loc='upper right')
+    ax.grid(True)
+
+    if save_path is not None:
+        fig.tight_layout()
+        fig.savefig(save_path, dpi=200)
+        print(f'Saved model probability figure to {save_path}')
+    plt.show()
+
+
+def plot_position_errors(times, errors, save_path=None):
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(times, errors[:, 0], label='Error x', color='tab:blue')
+    ax.plot(times, errors[:, 1], label='Error y', color='tab:red')
+    ax.axhline(0, color='k', lw=0.8, linestyle='--', alpha=0.5)
+
+    ax.set_xlabel('Time [s]')
+    ax.set_ylabel('Position error [m]')
+    ax.set_title('Position error in x and y over time (Standard IMM)')
+    ax.legend()
+    ax.grid(True)
+
+    if save_path is not None:
+        fig.tight_layout()
+        fig.savefig(save_path, dpi=200)
+        print(f'Saved position error figure to {save_path}')
+    plt.show()
+
+
+def main():
+    config_file = 'configs/imm.json'
+    obs_file = 'data/imm_single.txt'
+    gt_file = 'data/imm_single_gt.txt'
+
+    times, motion_phases, probs, errors, rmse_x, rmse_y, rmse_total = run_standard_imm(
+        config_file, obs_file, gt_file)
+
+    figure_dir = 'figures'
+    os.makedirs(figure_dir, exist_ok=True)
+    plot_model_probabilities(times, motion_phases, probs,
+                             save_path=os.path.join(figure_dir, 'figure1_standard_model_probabilities.png'))
+    plot_position_errors(times, errors,
+                         save_path=os.path.join(figure_dir, 'figure2_standard_position_errors.png'))
+
+    print('\nDone. Figures saved in the figures/ directory, outputs in data/.')
+
+
+if __name__ == '__main__':
+    main()
